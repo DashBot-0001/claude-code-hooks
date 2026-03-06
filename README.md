@@ -1,79 +1,51 @@
-# Claude Code Stop Hook — 任务完成自动回调
+# claude-code-hooks
 
-当 Claude Code（含 Agent Teams）完成任务后，自动：
-1. 将结果写入 JSON 文件
-2. 发送 聊天软件 通知到指定群组
-3. 写入 pending-wake 文件供 AGI 主会话读取
+Claude Code 完成任务后自动通过 Telegram 通知 OpenClaw 主 agent 的回调机制。
 
-## 架构
+## 工作原理
+
+通过 Claude Code 的 Stop Hook 机制，在每次任务完成时自动触发通知脚本，将任务结果推送给 OpenClaw 主 agent。
 
 ```
 dispatch-claude-code.sh
-  │
-  ├─ 写入 task-meta.json（任务名、目标群组）
-  ├─ 启动 Claude Code（via claude_code_run.py）
-  │   └─ Agent Teams lead + sub-agents 运行
-  │
-  └─ Claude Code 完成 → Stop Hook 自动触发
-      │
-      ├─ notify-agi.sh 执行：
-      │   ├─ 读取 task-meta.json + task-output.txt
-      │   ├─ 写入 latest.json（完整结果）
-      │   ├─ openclaw message send → 聊天软件 群
-      │   └─ 写入 pending-wake.json
-      │
-      └─ AGI heartbeat 读取 pending-wake.json（备选）
+       │
+       ├─ 写入 task-meta.json（任务名、目标群组）
+       ├─ 启动 Claude Code（via claude_code_run.py）
+       │   └─ Claude Code 执行任务
+       │
+       └─ 任务完成 → Stop Hook 自动触发
+               │
+               └─ notify-agi.sh 执行：
+                   ├─ 读取 task-meta.json + task-output.txt
+                   ├─ 写入 latest.json（完整结果）
+                   ├─ openclaw message send → Telegram 群
+                   └─ 写入 pending-wake.json（供 AGI 心跳读取）
 ```
 
-## 文件说明
+### 防重复机制
 
-| 文件 | 位置 | 作用 |
-|------|------|------|
-| `hooks/notify-agi.sh` | `~/.claude/hooks/` | Stop Hook 脚本 |
-| `hooks/claude-settings.json` | `~/.claude/settings.json` | Claude Code 配置（注册 hook）|
-| `scripts/dispatch-claude-code.sh` | 任意位置 | 一键派发任务 |
-| `scripts/claude_code_run.py` | 任意位置 | Claude Code PTY 运行器 |
+Stop 和 SessionEnd 事件均会触发 Hook。脚本使用 `.hook-lock` 文件去重：30 秒内重复触发自动跳过，只处理第一个事件（通常是 Stop）。
 
-## 使用方法
+## 安装步骤
 
-### 基础任务
+### 1. 复制 Hook 脚本
+
 ```bash
-dispatch-claude-code.sh \
-  -p "实现一个 Python 爬虫" \
-  -n "my-scraper" \
-  -g "-5189558203" \
-  --permission-mode "bypassPermissions" \
-  --workdir "/home/ubuntu/projects/scraper"
+mkdir -p ~/.claude/hooks/
+cp hooks/notify-agi.sh ~/.claude/hooks/
+chmod +x ~/.claude/hooks/notify-agi.sh
 ```
 
-### Agent Teams 任务
+### 2. 配置 Claude Code Settings
+
+将 `hooks/claude-settings.json` 的内容合并到 `~/.claude/settings.json`（或直接覆盖）：
+
 ```bash
-dispatch-claude-code.sh \
-  -p "重构整个项目的测试" \
-  -n "test-refactor" \
-  -g "-5189558203" \
-  --agent-teams \
-  --teammate-mode auto \
-  --permission-mode "bypassPermissions" \
-  --workdir "/home/ubuntu/projects/myapp"
+cp hooks/claude-settings.json ~/.claude/settings.json
 ```
 
-### 参数
+`settings.json` 注册的 Hook 配置如下：
 
-| 参数 | 说明 |
-|------|------|
-| `-p, --prompt` | 任务提示（必需）|
-| `-n, --name` | 任务名称（用于跟踪）|
-| `-g, --group` | 聊天软件 群组 ID（结果自动发送）|
-| `-w, --workdir` | 工作目录 |
-| `--agent-teams` | 启用 Agent Teams |
-| `--teammate-mode` | Agent Teams 模式 (auto/in-process/tmux) |
-| `--permission-mode` | 权限模式 |
-| `--allowed-tools` | 允许的工具列表 |
-
-## Hook 配置
-
-在 `~/.claude/settings.json` 中注册：
 ```json
 {
   "hooks": {
@@ -83,22 +55,82 @@ dispatch-claude-code.sh \
 }
 ```
 
-## 防重复机制
+### 3. 确认路径（dash001 用户）
 
-Hook 在 Stop 和 SessionEnd 都会触发。脚本使用 `.hook-lock` 文件去重：
-- 30秒内重复触发自动跳过
-- 只处理第一个事件（通常是 Stop）
+脚本已适配 `dash001` 用户，以下路径已预设：
 
-## 结果文件
+| 路径 | 说明 |
+|------|------|
+| `~/.claude/hooks/notify-agi.sh` | Stop Hook 脚本 |
+| `/home/dash001/.openclaw/workspace/data/claude-code-results/` | 结果输出目录 |
+| `/home/dash001/.npm-global/bin/openclaw` | openclaw CLI 路径 |
 
-任务完成后，结果写入 `/home/ubuntu/clawd/data/claude-code-results/latest.json`：
+如需修改，编辑 `hooks/notify-agi.sh` 顶部的变量定义。
+
+## 使用方法
+
+### 基础任务派发
+
+```bash
+bash scripts/dispatch-claude-code.sh \
+  -p "实现一个 Python 爬虫" \
+  -n "my-scraper" \
+  -g "目标TelegramGroupID" \
+  --permission-mode "bypassPermissions" \
+  --workdir "/path/to/project"
+```
+
+### 参数说明
+
+| 参数 | 说明 |
+|------|------|
+| `-p, --prompt` | 任务提示（必填）|
+| `-n, --name` | 任务名称（用于跟踪）|
+| `-g, --group` | Telegram 群组 ID（结果自动发送）|
+| `-w, --workdir` | Claude Code 工作目录 |
+| `--permission-mode` | 权限模式（如 `bypassPermissions`）|
+| `--allowed-tools` | 允许的工具列表 |
+| `--model` | 覆盖默认模型 |
+
+### 结果文件
+
+任务完成后，结果写入：
+
+```
+/home/dash001/.openclaw/workspace/data/claude-code-results/latest.json
+```
+
+文件格式：
+
 ```json
 {
   "session_id": "...",
-  "timestamp": "2026-02-10T01:02:33+00:00",
-  "task_name": "fibonacci-demo",
-  "telegram_group": "-5189558203",
+  "timestamp": "2026-03-06T12:00:00+11:00",
+  "task_name": "my-scraper",
+  "telegram_group": "...",
   "output": "...",
   "status": "done"
 }
 ```
+
+## 目录结构
+
+```
+claude-code-hooks/
+├── README.md                          # 本文件
+├── claude-settings.json               # Claude Code 配置（备用）
+├── hooks/
+│   ├── notify-agi.sh                  # Stop Hook 脚本 → 复制到 ~/.claude/hooks/
+│   └── claude-settings.json           # Claude Code settings → 复制到 ~/.claude/
+└── scripts/
+    ├── dispatch-claude-code.sh        # 一键派发任务脚本
+    ├── claude_code_run.py             # Claude Code PTY 运行器
+    └── run-claude-code.sh             # 备用运行脚本
+```
+
+## 注意事项
+
+- **不要在脚本中硬编码 token 或群组 ID**：群组 ID 通过 `-g` 参数传入，bot token 由 openclaw 配置文件管理。
+- **防重复锁文件**：`.hook-lock` 文件位于结果目录，30 秒内重复触发自动跳过；如需强制重新触发，删除该文件即可。
+- **openclaw CLI 路径**：脚本默认使用 `/home/dash001/.npm-global/bin/openclaw`，若 openclaw 安装位置不同，请修改 `notify-agi.sh` 中的 `OPENCLAW_BIN` 变量。
+- **结果目录自动创建**：`notify-agi.sh` 会自动创建 `data/claude-code-results/`，无需手动创建。
